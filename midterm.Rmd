@@ -1,0 +1,919 @@
+---
+title: "Interracial/International Marriage in the US"
+author: "Clarissa Bhargava"
+date: "10/20/2020"
+output: html_document
+---
+
+
+#Setup
+
+```{r include=FALSE}
+library(tidyverse)
+library(scales)
+library(gghighlight)
+library(socviz)     
+library(stringr)
+library(tidycensus)
+library(survey)
+library(srvyr)
+library(choroplethr)
+library(choroplethrMaps)
+library(mapproj)
+library(ggmap)
+register_google("AIzaSyDAXDyVWOieccRSt_n9z2AdKDvNVMUx24s")
+```
+
+## Sample data
+
+Quick population dataset: 
+
+```{r}
+data(df_pop_state)
+```
+
+## Sample Mapping
+
+Sample population map (2012) by state: 
+
+```{r}
+state_choropleth(df_pop_state,
+                 title = "2012 State Population Estimates",
+                 legend = "Population",
+                 num_colors = 1
+                 )
+```
+
+Zoom-in population map of New England over a reference map:
+
+```{r, message = FALSE, warning = FALSE}
+state_choropleth(df_pop_state,
+                 title = "2012 State Population Estimates",
+                 legend = "Population",
+                 num_colors = 1,
+                 zoom = c("maine", "new hampshire", "vermont", "massachusetts", "connecticut", "rhode island"),
+                 reference_map = TRUE
+                )
+```
+
+
+## Getting test data from the American Community Survey
+
+Import a test data set just for Vermont in 2018:
+
+```{r}
+data_test <- get_pums(
+  variables = c("PUMA", "SEX", "AGEP", "SCHL"),
+  state = "VT",
+  survey = "acs1",
+  recode = TRUE,
+  rep_weights = "person"
+  )
+```
+
+and the corresponding survey statistics:
+
+```{r}
+test_design <- to_survey(data_test, type = "person")
+```
+
+Quick comparison of the number and the standard error of different sexes in each PUMA region:
+
+```{r}
+test_design %>%
+  survey_count(PUMA, SEX_label)
+```
+
+Test: what is the proportion of Vermonters with a Bachelor's degree or above (age 25 and up), with confidence intervals:
+
+```{r}
+test_design %>%
+  mutate(ba_above = SCHL %in% c("21", "22", "23", "24")) %>%
+  filter(AGEP >= 25) %>%
+  group_by(PUMA, SEX_label) %>%
+  summarize(
+    age_25_up = survey_total(vartype = "ci"),
+    ba_above = survey_total(ba_above, vartype = "ci"),
+    ba_pct = survey_mean(ba_above, vartype = "ci")
+    )
+```
+
+
+# Now onto the real data
+
+Import big PUMS dataset:
+
+```{r}
+data_pums <- get_pums(
+  variables = c("PUMA", "SEX", "AGEP", "NATIVITY", "CIT", "MARHM", "MAR", "HHT", "RELSHIPP", "ST", "WAOB", "RAC1P", "HISP"),
+  survey = "acs1",
+  year = "2019",
+  state = c("AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA", "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD", "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ", "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI" , "WY", "DC")
+)
+```
+
+
+Trim down to only include married-couple households (where one of the spouses is the 'householder'):
+
+```{r}
+data_trimmed <- data_pums %>% 
+  filter(MAR == 1, HHT == 1, RELSHIPP %in% c(20,21,23)) %>% 
+  select(-c(MAR, HHT))
+```
+
+Checking out our dataset: 
+
+```{r}
+data_trimmed
+```
+
+Sanity check on the total population represented by this survey:
+
+```{r}
+data_trimmed %>% 
+  summarize(
+    n = sum(PWGTP)
+  )
+```
+
+This dataset includes information about approx. 116,689,207 married people who head a household and live with their spouse. It does not include people who live in group homes, or households headed by another person (eg, roommates, a parent, a child). This is therefore not a full count of married couples, but we can make an assumption that since those populations are relatively small, then summary statistics (like percentages) will be largely accurate. This dataset may undercount mixed-nativity couples where a foreign-born spouse [still] resides abroad, as we only have nativity/citizenship data for household members.
+
+
+Let's add a variable, `mix` to determined which couples are both `"Native"`, both `"Foreign"`, or of`"Mixed"` nativity.
+
+```{r}
+data_trimmed <- data_trimmed %>% 
+  group_by(SERIALNO) %>% 
+  mutate(
+    mix = case_when(
+      mean(as.double(NATIVITY)) == 1.0 ~ "Native",
+      mean(as.double(NATIVITY)) == 1.5 ~ "Mixed",
+      mean(as.double(NATIVITY)) == 2.0 ~ "Foreign"
+      )
+    )
+```
+
+
+And we'll convert this into a survey to get some population errors:
+
+```{r}
+survey_design <- to_survey(data_trimmed, design = "cluster")
+```
+
+```{r}
+survey_design %>% 
+  survey_count(mix)
+```
+
+## Some quick plots
+
+Checking out mixed nativity vs. citizenship:
+
+```{r message = FALSE}
+data_trimmed %>% 
+  group_by(mix, CIT) %>% 
+  summarize(
+    n = sum(PWGTP)
+  ) %>% 
+  ggplot(aes(x = factor(CIT, labels = c("Born in U.S.", "Born in territories", "Born abroad", "Naturalized", "Non-citizen")), y = n, group = as.factor(mix), fill = as.factor(mix))) +
+  geom_bar(stat = "identity", position = position_fill()) +
+  theme_minimal() +
+  labs(
+    title = "U.S. Citizens born outside U.S. borders marry foreign-born spouses more often",
+    caption = "Source: U.S. Census Bureau, 2019 American Community Survey",
+    x = NULL,
+    y = "Proportion"
+  ) +
+  scale_fill_discrete(name = "Nativity", labels = c("both foreign", "mixed", "both native"))
+```
+
+Checking out same-sex marriages vs. mixed nativity:
+
+```{r}
+survey_design %>% 
+  survey_count(RELSHIPP)
+```
+
+```{r, message = FALSE}
+data_trimmed %>% 
+  group_by(mix, RELSHIPP) %>% 
+  summarize(
+    n = 2*sum(PWGTP)
+  ) %>% 
+  filter(RELSHIPP == 23) %>% 
+  ggplot(aes(x = factor(mix, labels = c("Both Foreign", "Mixed Nativity", "Both Native")), y = n, fill = as.factor(mix))) +
+  geom_bar(stat = "identity") +
+    labs(
+    title = "Married same-sex couples are most likely to be native-born U.S. citizens",
+    caption = "Source: U.S. Census Bureau, 2019 American Community Survey",
+    x = NULL,
+    y = "Number of people in same-sex marriages in the U.S."
+  ) +
+  scale_fill_discrete(name = "Nativity") +
+  theme_minimal() +
+  theme(
+    legend.position = "NONE"
+  )
+```
+
+# Mapping
+
+## Map setup
+
+```{r}
+theme_map <- function(base_size=14, base_family="") {
+    require(grid)
+    theme_bw(base_size=base_size, base_family=base_family) %+replace%
+        theme(axis.line=element_blank(),
+              axis.text=element_blank(),
+              axis.ticks=element_blank(),
+              axis.title=element_blank(),
+              panel.background=element_blank(),
+              panel.border=element_blank(),
+              panel.grid=element_blank(),
+              panel.spacing=unit(0, "lines"),
+              plot.background=element_blank(),
+              legend.justification = c(0,0),
+              legend.position = c(0.88, 0.2))
+}
+```
+
+In the Census microdata, FIPS codes denote regions, like states and counties.
+
+```{r}
+data(fips_codes)
+```
+
+```{r}
+fips_codes[1:3] %>% 
+  unique() %>% 
+  filter(as.integer(state_code) <= 56) -> state_key
+
+state_key$state_name <- tolower(state_key$state_name)
+```
+
+Getting a `state_key` to for later use.
+
+```{r}
+state_key
+```
+
+## Data setup: Which states have the highest foreign-born populations?
+```{r message = FALSE}
+data_pums %>%
+  group_by(ST) %>%
+  mutate(
+    state_mpop = sum(PWGTP)
+      ) %>% 
+  group_by(ST, NATIVITY) %>% 
+  summarise(
+    pct = (sum(PWGTP)/state_mpop)
+  ) %>% 
+  unique() %>% 
+  filter(NATIVITY == "2") %>% 
+  ungroup() %>% 
+  select(-NATIVITY) -> data_foreign
+```
+
+```{r}
+data_foreign$ST %>% 
+  str_pad(2, pad = "0") -> data_foreign$ST
+```
+
+```{r}
+data_foreign %>% 
+  inner_join(state_key, by = c("ST" = "state_code")) %>% 
+  select(state_name, pct) -> foreign_for_map
+
+names(foreign_for_map) <- c("region", "value")
+```
+
+```{r, message=FALSE, fig.width = 5}
+state_choropleth(foreign_for_map, 
+                 num_colors = 1
+                 ) +
+  theme_map() +
+  scale_fill_gradient(name = "Foreign-born", low = "white", high = colorspace::sequential_hcl(1), labels = scales::label_percent(), limits = c(0, 0.2672)) +
+  labs(
+    title = "Proportion of population that is foreign-born",
+    caption = "Source: U.S. Census Bureau, 2019 American Community Survey"
+  )
+```
+
+```{r}
+foreign_for_map %>% 
+  arrange(-value)
+```
+
+
+## Data setup: Mixed-nativity marriages
+
+What percent of marriages, by state, are each nativity type?
+
+```{r}
+data_trimmed %>%
+  group_by(ST) %>%
+  mutate(
+    state_mpop = sum(PWGTP)
+      ) %>% 
+  group_by(ST, mix) %>% 
+  summarise(
+    pct = (sum(PWGTP)/state_mpop)
+  ) %>% 
+  unique() -> data_toy
+```
+
+```{r}
+data_toy
+```
+
+Quick formatting fix before it causes issues:
+
+```{r}
+data_toy$ST %>% 
+  str_pad(2, pad = "0") -> data_toy$ST
+```
+
+Let's isolate mixed nativity marriages and get ready to map.
+
+```{r}
+data_toy %>% 
+  inner_join(state_key, by = c("ST" = "state_code")) %>% 
+  filter(mix == "Mixed") %>% 
+  ungroup() %>% 
+  select(state_name, pct) -> toy_for_map
+
+names(toy_for_map) <- c("region", "value")
+```
+
+
+Let's throw togeth a chloropleth map.
+
+```{r, message = FALSE, fig.width = 5}
+state_choropleth(toy_for_map, 
+                 num_colors = 1
+                 ) +
+  theme_map() +
+  scale_fill_gradient(name = "Mixed nativity", low = "white", high = colorspace::sequential_hcl(1), labels = scales::label_percent(), limits = c(0, 0.172)) +
+  labs(
+    title = "Proportion of Married-Couple Households that are Mixed Nativity",
+    subtitle = "'Mixed Nativity' means that one spouse was born a U.S. Citizen, and the other was not",
+    caption = "Source: U.S. Census Bureau, 2019 American Community Survey"
+  )
+```
+
+Cool! Hawaii, Washington D.C., California, and Nevada are all pretty high by this metric, with more than 15% of married householders being of mixed-nativity.
+
+```{r}
+toy_for_map %>% 
+  arrange(-value)
+```
+
+Now let's look at marriages where at least one spouse was born outside of the U.S.
+
+```{r}
+data_toy %>% 
+  inner_join(state_key, by = c("ST" = "state_code")) %>% 
+  filter(mix == "Mixed" | mix == "Foreign") %>% 
+  group_by(ST) %>% 
+  mutate(combo = sum(pct)) %>% 
+  ungroup() %>% 
+  select(state_name, combo) %>% 
+  unique() -> toy_for_map2
+
+names(toy_for_map2) <- c("region", "value")
+```
+
+```{r fig.width = 5}
+state_choropleth(toy_for_map2, 
+                 legend = "%",
+                 num_colors = 1
+                 ) +
+  theme_map() +
+  labs(
+    title = "Proportion of Married-Couple Households With At Least One Foreign-Born Spouse",
+    caption = "Source: U.S. Census Bureau, 2019 American Community Survey"
+  )
+```
+
+WOW, California. We have a very large immigrant population!
+
+```{r}
+toy_for_map2 %>% 
+  arrange(-value)
+```
+
+
+## Data setup: Ethnicities
+
+Let's recode the race and Hispanic variables into broad racial/ethnic groups:
+
+```{r}
+data_trimmed %>% 
+  mutate(
+    race = case_when(
+      RAC1P == "1" & HISP == "1" ~ "White, non-Hispanic",
+      HISP != "1" ~ "Hispanic",
+      RAC1P == "2" ~ "Black",
+      RAC1P %in% c("3", "4", "5") ~ "Native American",
+      RAC1P == "6" ~ "Asian",
+      RAC1P == "7" ~ "Pacific Islander",
+      RAC1P == "8" | RAC1P == "9" ~ "Other/Multiracial"
+    )
+  ) -> data_trimmed
+```
+
+
+Sanity check:
+
+```{r}
+data_trimmed
+```
+
+Let's add a variable, `interracial` which will be `TRUE` for both partners in an interracial/interethnic marriage.
+
+```{r}
+data_trimmed %>% 
+  group_by(SERIALNO) %>% 
+  select(SERIALNO, SPORDER, ST, mix, race) %>% 
+  pivot_wider(
+    names_from = SPORDER,
+    values_from = race
+  ) %>% 
+  mutate(
+    interracial = 
+      case_when(
+        `1` != `2` ~ TRUE,
+        `1` == `2` ~ FALSE
+      )
+  ) %>% 
+  pivot_longer(
+    cols = 4:5,
+    names_to = "SPORDER",
+    values_to = "race"
+  ) -> data_interracial
+```
+
+
+Adding this back into the main dataset:
+
+```{r message = FALSE}
+data_trimmed <- data_trimmed %>% 
+  inner_join(data_interracial)
+```
+
+
+Now let's see how many marriages are interracial/interethnic:
+
+```{r message = FALSE}
+data_trimmed %>%
+  ungroup() %>% 
+  mutate(
+    total = sum(PWGTP)
+      ) %>% 
+  group_by(interracial) %>% 
+  summarise(
+    pct = (sum(PWGTP)/total)*100
+  ) %>% 
+  unique()
+```
+About 10.7% of married couples are interracial! This is up from 9.5% in 2010 (Source: Household and Families: 2010).
+
+Let's check out the summary statistic for new marriages:
+
+```{r message = FALSE}
+data_trimmed %>% 
+  ungroup() %>% 
+  filter(MARHM == "1") %>%
+  mutate(
+    total_pop = sum(PWGTP)
+      ) %>% 
+  group_by(interracial) %>% 
+  summarise(
+    pct = (sum(PWGTP)/total_pop)
+  ) %>% 
+  unique()
+```
+
+Mapping interracial marriage:
+
+```{r}
+data_trimmed %>%
+  ungroup() %>% 
+  group_by(ST) %>% 
+  mutate(
+    total = sum(PWGTP)
+      ) %>% 
+  group_by(ST, interracial) %>% 
+  summarise(
+    pct = (sum(PWGTP)/total)
+  ) %>% 
+  unique() %>% 
+  filter(interracial == TRUE) %>% 
+  select(ST, pct) -> data_race
+```
+
+
+```{r}
+data_race$ST %>% 
+  str_pad(2, pad = "0") -> data_race$ST
+```
+
+```{r}
+data_race %>% 
+  inner_join(state_key, by = c("ST" = "state_code")) %>% 
+  ungroup() %>% 
+  select(state_name, pct)-> race_for_map
+
+names(race_for_map) <- c("region", "value")
+```
+
+```{r, message = FALSE, fig.width = 5}
+state_choropleth(race_for_map, 
+                 num_colors = 1
+                 ) +
+  theme_map() +
+  scale_fill_binned(name = "Interracial", low = "white", high = colorspace::sequential_hcl(1), labels = scales::label_percent(accuracy = 1L), breaks = c(0.05, 0.1, 0.15, 0.2, 0.25, 0.3), limits = c(0, 0.34)) +
+  labs(
+    title = "Proportion of Married-Couple Households that are Interracial",
+    caption = "Source: U.S. Census Bureau, 2019 American Community Survey"
+  )
+```
+
+```{r}
+race_for_map %>% 
+  arrange(-value)
+```
+
+
+Let's add another variable, `int2` to denote couples who are both international (mixed-nativity) and interracial.
+
+```{r}
+data_trimmed %>% 
+  mutate(
+    int2 =
+      case_when(
+        mix == "Mixed" & interracial ~ TRUE,
+        mix == "Native" | mix == "Foreign" | !interracial ~ FALSE
+      )
+      ) -> data_trimmed
+```
+
+
+```{r}
+data_trimmed %>% 
+  mutate(
+    intOr =
+      case_when(
+        mix == "Mixed" | interracial ~ TRUE,
+        mix == "Native" | mix == "Foreign" | !interracial ~ FALSE
+      )
+      ) -> data_trimmed
+```
+
+
+```{r message = FALSE}
+data_trimmed %>% 
+  ungroup() %>% 
+  mutate(
+    total_pop = sum(PWGTP)
+      ) %>% 
+  group_by(intOr) %>% 
+  summarise(
+    pct = (sum(PWGTP)/total_pop)
+  ) %>% 
+  unique()
+```
+
+And let's check out mixed nativity vs. interracial/interethnic:
+
+```{r message=FALSE}
+data_trimmed %>%
+  ungroup() %>% 
+  group_by(mix) %>% 
+  mutate(
+    total_cat = sum(PWGTP)
+      ) %>% 
+  group_by(mix, interracial) %>% 
+  summarise(
+    mix = mix,
+    pct = (sum(PWGTP)/total_cat)*100
+  ) %>% 
+  unique() %>% 
+  ggplot(mapping = aes(x = factor(mix, labels = c("Both Foreign", "Mixed Nativity", "Both Native")), y = pct, group = interracial, fill = interracial)) +
+  geom_bar(stat = "identity") +
+  scale_fill_discrete(name = NULL, labels = c("Same race", "Interracial")) +
+  theme_minimal() +
+  labs(
+    title = "Mixed-Nativity Married Couples Are Also Most Likely to be Interracial",
+    x = NULL,
+    y = "% Married householders"
+  ) +
+  coord_fixed(ratio=0.03)
+```
+
+Of all the mixed-nativity marriages, more than a third are interracial or inter-ethnic. For couples in which both spouses are foreign-born, they are most likely to be members of the same [broad] racial and ethnic groups.
+
+
+```{r message=FALSE}
+data_trimmed %>% 
+  ungroup() %>% 
+  filter(mix != "Native", WAOB != "1" & WAOB != "2") %>% 
+  select(mix, PWGTP, WAOB) %>% 
+  group_by(mix, WAOB) %>% 
+  summarize(n = sum(PWGTP))  %>% 
+  ggplot(mapping = aes(x = n, y = factor(mix, labels = c("Both Foreign", "Mixed")), group = WAOB, fill = WAOB)) +
+  geom_bar(stat = "identity",  position = position_fill()) +
+  scale_fill_brewer(palette = "Set3", name = "Birthplace", labels = c("Latin America", "Asia", "Europe", "Africa", "Canada", "Oceania")) +
+  theme_minimal() +
+  labs(
+    y = "Spouse nativity",
+    x = "% Married foreign-born householders"
+  ) +
+  coord_fixed(ratio=0.2)
+```
+
+```{r message=FALSE}
+data_trimmed %>% 
+  ungroup() %>% 
+  filter(mix != "Native", WAOB != "1" & WAOB != "2") %>% 
+  group_by(WAOB) %>% 
+  mutate(
+    total_cat = sum(PWGTP)
+      ) %>% 
+  ungroup() %>% 
+  group_by(WAOB, mix) %>% 
+  summarize(
+    pct = sum(PWGTP)/total_cat
+  ) %>% 
+  unique() %>% 
+  ggplot(mapping = aes(y = pct, x = factor(WAOB, labels = c("Asia", "Africa", "Latin America", "Europe", "Oceania", "Canada"), levels = c("4", "6", "3", "5", "8", "7")), group = mix, fill = mix)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  scale_fill_brewer(palette = "Paired", name = "Spouse Nativity", labels = c("Both Foreign", "Mixed Nativity")) +
+  theme_minimal() +
+  labs(
+    title = "Among foreigners in US, Canadians most likely to marry Americans",
+    subtitle = "Foreign-born Asians most likely to marry another foreigner",
+    y = "Proportion of households",
+    x = "World area of birth"
+  ) 
+```
+
+
+```{r message=FALSE}
+data_trimmed %>% 
+  ungroup() %>% 
+  filter(mix != "Native", WAOB != "1" & WAOB != "2") %>% 
+  select(mix, PWGTP, WAOB) %>% 
+  group_by(WAOB, mix) %>% 
+  summarize(n = sum(PWGTP))  %>% 
+  ggplot(mapping = aes(y = n, x = factor(WAOB, labels = c("Latin America", "Asia", "Europe", "Africa", "Canada", "Oceania")), group = mix, fill = mix)) +
+  geom_bar(stat = "identity") +
+  scale_fill_brewer(palette = "Paired", name = "Spouse Nativity", direction = -1, labels = c("Both Foreign", "Mixed Nativity")) +
+  scale_y_continuous(label=comma) +
+  theme_minimal() +
+  labs(
+    title = "Married population reflects immigration trends from Latin America and Asia",
+    y = "Number of married people",
+    x = "World area of birth"
+  ) 
+```
+
+
+
+## Let's examine marriages in the past year
+
+```{r}
+data_trimmed %>% 
+  ungroup() %>% 
+  filter(MARHM == "1") %>%
+  summarize(
+    total_new = sum(PWGTP)
+    )
+```
+
+
+```{r message = FALSE}
+data_trimmed %>% 
+  filter(MARHM == "1") %>%
+  group_by(ST) %>%
+  mutate(
+    state_mpop = sum(PWGTP)
+      ) %>% 
+  group_by(ST, mix) %>% 
+  summarise(
+    pct = (sum(PWGTP)/state_mpop)
+  ) %>% 
+  unique() -> newly_married
+```
+
+```{r message = FALSE}
+data_trimmed %>% 
+  ungroup() %>% 
+  filter(MARHM == "1") %>%
+  mutate(
+    total_pop = sum(PWGTP)
+      ) %>% 
+  group_by(mix) %>% 
+  summarise(
+    pct = (sum(PWGTP)/total_pop)
+  ) %>% 
+  unique()
+```
+
+
+```{r}
+newly_married$ST %>% 
+  str_pad(2, pad = "0") -> newly_married$ST
+```
+
+Let's isolate mixed nativity marriages and get ready to map.
+
+```{r}
+newly_married %>% 
+  inner_join(state_key, by = c("ST" = "state_code")) %>% 
+  filter(mix == "Mixed") %>% 
+  ungroup() %>% 
+  select(state_name, pct) -> newly_map
+
+names(newly_map) <- c("region", "value")
+```
+
+
+Let's throw togeth a chloropleth map.
+
+```{r, message=FALSE, fig.width = 5}
+state_choropleth(newly_map, 
+                 num_colors = 1
+                 ) +
+  theme_map() +
+  scale_fill_gradient(name = "Mixed nativity", low = "white", high = colorspace::sequential_hcl(1), labels = scales::label_percent(), limits=c(0, 0.25)) +
+  labs(
+    title = "Nevada, Hawaii, California see high rates of new mixed-nativity marriages",
+    subtitle = "Last year, more than 20% of marriages in these states were between mixed-nativity couples.",
+    caption = "Source: U.S. Census Bureau, 2019 American Community Survey"
+  )
+```
+
+```{r}
+newly_map %>% 
+  arrange(-value)
+```
+
+```{r}
+data_foreign %>% 
+  full_join(newly_married, by = "ST") %>% 
+  filter(mix == "Mixed") %>% 
+  mutate(
+    diff = pct.x-pct.y
+  ) %>% 
+  inner_join(state_key, by = c("ST" = "state_code")) %>% 
+  arrange(-diff)
+```
+
+
+
+```{r}
+data_foreign %>% 
+  full_join(newly_married, by = "ST") %>% 
+  filter(mix == "Mixed") %>% 
+  mutate(
+    diff = pct.x-pct.y
+  ) %>% 
+  ggplot() +
+  geom_point(mapping = aes(x=pct.x, y=pct.y, color = -diff)) +
+  scale_color_binned(high = "springgreen2", low = "royalblue3", limits = c(-0.1, 0.06)) +
+  scale_x_continuous(labels = scales::label_percent(), breaks = c(0.05, 0.1, 0.15, 0.2, 0.25)) +
+  scale_y_continuous(labels = scales::label_percent()) +
+  geom_abline(color = "gray40", linetype = "dashed") +
+  labs(
+    subtitle = "In states with more immigrants, new marriages cross borders",
+    x = "Immigrant population",
+    y = "New marriages that are mixed-nativity",
+    caption = "Source: U.S. Census Bureau, 2019 American Community Survey"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "none"
+  ) + 
+  coord_fixed(1) +
+  annotate("text", x = 0.255, y = 0.192, label = "California", color = "darkslategray4") +
+  annotate("text", x = 0.19, y = 0.21, label = "Hawaii", color = "darkslategray4") +
+  annotate("text", x = 0.176, y = 0.247, label = "Nevada", color = "darkslategray4") +
+  annotate("text", x = 0.122, y = 0.19, label = "D.C.", color = "darkslategray4")
+```
+
+
+## Let's look at citizenship
+
+```{r message = FALSE}
+data_trimmed %>% 
+  ungroup() %>% 
+  filter(mix == "Foreign") %>% 
+  select(SERIALNO, PWGTP, CIT) %>% 
+  group_by(CIT) %>% 
+  summarize(
+    total = sum(PWGTP)
+  )
+```
+
+
+Let's look at the breakdown of citizenship and nativity of each married-couple household.
+
+```{r}
+data_trimmed %>% 
+  group_by(SERIALNO) %>% 
+  select(SERIALNO, SPORDER, ST, mix, CIT) %>% 
+  pivot_wider(
+    names_from = SPORDER,
+    values_from = CIT
+  ) %>% 
+  mutate(
+    citizen = 
+      case_when(
+        (`1` %in% c("1","2","3") & `2` == "5") | (`1` == "5" & `2` %in% c("1","2","3"))  ~ "Cit/Noncit",
+        `1` %in% c("1","2","3") & `2` %in% c("1","2","3") ~ "b_Citizen",
+        (`1` %in% c("1","2","3") & `2` == "4") | (`1` == "4" & `2` %in% c("1","2","3"))  ~ "Cit/Natur",
+        (`1` == "4" & `2` == "5") | (`1` == "5" & `2` == "4") ~ "Natur/Noncit",
+        `1` == "4" & `2` == "4" ~ "b_Naturalized",
+        `1` == "5" & `2` == "5" ~ "b_Noncitizen"
+      )
+  ) %>% 
+  pivot_longer(
+    cols = 4:5,
+    names_to = "SPORDER",
+    values_to = "CIT"
+  ) -> data_citizenship
+```
+
+
+```{r}
+data_citizenship
+```
+
+Adding this back into the main dataset:
+
+```{r message = FALSE}
+data_trimmed <- data_trimmed %>% 
+  inner_join(data_citizenship)
+```
+
+
+```{r message = FALSE}
+data_trimmed %>% 
+  ungroup() %>% 
+  group_by(mix) %>% 
+  mutate(
+    total_cat = sum(PWGTP)
+      ) %>% 
+  ungroup() %>% 
+  group_by(citizen, mix) %>% 
+  summarize(
+    pct = sum(PWGTP)/total_cat
+  ) %>% 
+  unique()
+```
+
+## Some quick data from the Department of Homeland Security, Office of Immigration Statistics
+
+```{r}
+new_imm <- c(82449,	79452, 91153, 81121, 76803, 106599, 133005, 115436,	111674,	86688)
+adj_status <- c(189460, 178868,	182276,	167211,	162049,	158768,	171353,	177473,	156475,	217646)
+
+spouse_trend <- tibble(2010:2019, new_imm, adj_status)
+```
+
+
+```{r}
+names(spouse_trend) <- c("Year", "n_new", "n_adjusted")
+spouse_trend
+```
+
+```{r}
+spouse_trend %>% 
+  ggplot(mapping = aes(x = Year)) +
+  geom_point(aes(y = n_new), color = "springgreen4") +
+  geom_point(aes(y = n_adjusted), color = "blue") +
+  scale_y_continuous(label=comma, limits = c(0, 225000)) +
+  scale_x_continuous(breaks = 2010:2019, minor_breaks = NULL) +
+  labs(
+    title = "Spouse-based green cards granted over the past decade",
+    caption = "Source: Department of Homeland Security, 2019",
+    x = "Year",
+    y = "n"
+  ) + 
+  theme_minimal() +
+  annotate("text", x = 2011.2, y = 205000, label = "Adjustment of Status", color = "blue") +
+  annotate("text", x = 2010.5, y = 100000, label = "New visa", color = "springgreen4") +
+  coord_fixed(ratio=0.00003)
+```
+
+
+
+
+
+
+
+
+
+
